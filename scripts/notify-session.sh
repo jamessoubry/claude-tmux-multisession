@@ -1,7 +1,7 @@
 #!/bin/bash
 # notify-session.sh — send a message from one Claude Code session to another via tmux.
 # Usage: notify-session.sh <session-name> "message"
-# Example: bash notify-session.sh mund "reload your CLAUDE.md"
+# Example: bash notify-session.sh myproject "reload your CLAUDE.md"
 # Sessions follow the claude-<name> tmux naming convention (see claude.sh).
 #
 # Delivers "[from:<sender>] message" into the target session's pane via

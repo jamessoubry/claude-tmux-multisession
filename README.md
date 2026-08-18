@@ -30,7 +30,7 @@ None of these depend on each other — pick the ones that solve a problem you ac
 
 ```bash
 bash claude.sh          # defaults to "main" — your overseer/ops session
-bash claude.sh mund     # opens (or creates) ~/mund in tmux session claude-mund
+bash claude.sh myapp    # opens (or creates) ~/myapp in tmux session claude-myapp
 bash claude.sh newthing # prompts to create ~/newthing if it doesn't exist yet
 ```
 
@@ -76,8 +76,8 @@ This is the piece that turns "I have a list of things Claude should get around t
 `scripts/notify-session.sh` sends a message from one Claude Code session into another's tmux pane:
 
 ```bash
-bash notify-session.sh mund "reload your CLAUDE.md"
-# → delivers "[from:main] reload your CLAUDE.md" into the claude-mund pane
+bash notify-session.sh myapp "reload your CLAUDE.md"
+# → delivers "[from:main] reload your CLAUDE.md" into the claude-myapp pane
 ```
 
 I compared this against Claude Code's built-in `SendMessage`/`ListAgents` cross-session tools (shipped Aug 2026) and kept tmux instead: `SendMessage` only lands when the target session is already mid-turn, so it can't wake an idle session. `tmux send-keys` actively wakes it, and you get a free audit trail in scrollback — useful when you're coordinating several autonomous sessions and want to know later what one told another.

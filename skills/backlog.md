@@ -33,7 +33,7 @@ The argument is GitHub issues mode if it matches `owner/repo` (contains `/` but 
 ```markdown
 - [ ] [project] Feature description
 - [ ] [gavel] Add rate limiting to the public API
-- [ ] [mund] Fix timeout in LangGraph orchestrator
+- [ ] [myapp] Fix timeout in the job queue worker
 - [x] [polybot] Already done — skipped
 - [!] [gavel] Failed item — PR closed without merge / test failure / reason
 - [~] [clawband] PR pending — PR #42 YOUR_GITHUB_USER/clawband
@@ -83,7 +83,6 @@ When reading project config, check `<project_dir>/.backlog.yml` first. If it exi
 | Tag | Directory | Deploy | GitHub repo |
 |-----|-----------|--------|-------------|
 | `main` | `~/YOUR_PROJECTS/main` | — | — |
-| `mund` | `~/YOUR_PROJECTS/mund` | `./deploy.sh` | — |
 | `gavel` | `~/YOUR_PROJECTS/gavel` | `./deploy.sh` | `YOUR_GITHUB_USER/gavel` |
 | `replenish` | `~/YOUR_PROJECTS/replenish` | `./deploy.sh` | — |
 | `filemover` | `~/YOUR_PROJECTS/filemover` | CodeBuild via `./build.sh` | — |
