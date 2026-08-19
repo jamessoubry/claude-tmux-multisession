@@ -27,5 +27,10 @@ if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
   exit 1
 fi
 
-tmux send-keys -t "$TMUX_SESSION" "$FULL_MSG" "Enter"
+# tmux doesn't reliably register Enter when sent in the same send-keys call
+# as the text (known tmux quirk: https://github.com/tmux/tmux/issues/1778).
+# Split into two calls with a short delay.
+tmux send-keys -t "$TMUX_SESSION" -l "$FULL_MSG"
+sleep 0.5
+tmux send-keys -t "$TMUX_SESSION" Enter
 echo "Sent to $TMUX_SESSION: $FULL_MSG"
