@@ -283,9 +283,11 @@ UNPUSHED=$(git log origin/main..HEAD --oneline 2>/dev/null | grep -i "\[backlog\
 
 Run the three phases as sequential Agent tool calls (NOT the Workflow tool — agents consistently struggle to write Workflow scripts inline and fall back to Agent calls anyway; just use Agent directly).
 
+**Cost tiering** (borrowed from the [Ringer](https://github.com/NateBJones-Projects/ringer) swarm-orchestrator pattern — expensive model plans/reviews, cheap workers implement): Phase 1 (Implement) and Phase 2 (Test) are mechanical, well-specified work off a clear brief — spawn them with `model: "haiku"`. Phase 3 (Release) is the last gate before something ships (git push to main, deploy commands) — keep it on the default/calling model, no override. If a Haiku-implemented feature is genuinely complex or the FEATURE_DETAIL signals real ambiguity, drop the override and let it run on the calling session's default model instead — don't force Haiku on tasks it's likely to get wrong, the point is cost savings on the routine cases, not blind downgrading.
+
 **Phase 1 — Implement**
 
-Spawn an Agent with this brief:
+Spawn an Agent (`model: "haiku"` — see cost tiering above) with this brief:
 - Read the project CLAUDE.md and relevant source files, then implement the feature
 - Feature: `<feature>` (plain English title/description from the backlog line)
 - If `FEATURE_DETAIL` is set, pass it verbatim as additional context (file paths, constraints, acceptance criteria)
@@ -298,7 +300,7 @@ Spawn an Agent with this brief:
 
 **Phase 2 — Test**
 
-Only run if Phase 1 returned DONE. Spawn an Agent with this brief:
+Only run if Phase 1 returned DONE. Spawn an Agent (`model: "haiku"`) with this brief:
 - Run the project's full test suite
 - Verify the new tests pass and no regressions are introduced
 - Return "PASSED" or "FAILED: <details>"
