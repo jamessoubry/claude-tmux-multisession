@@ -38,7 +38,7 @@ Why tmux and not just multiple terminal tabs: sessions survive SSH disconnects, 
 
 The script also starts the LCM daemon and kicks off a SpecStory sync in the background before attaching — so memory and history capture are always warm.
 
-**Set up:** edit `YOUR_USER` in `scripts/claude.sh`, drop it somewhere on your `$PATH` (or alias it), install [tmux](https://github.com/tmux/tmux) if you don't have it.
+**Set up:** drop `scripts/claude.sh` somewhere on your `$PATH` (or alias it), install [tmux](https://github.com/tmux/tmux) if you don't have it. Project directories resolve under `$HOME` by default; set `CLAUDE_PROJECTS_DIR` to use another base.
 
 ## 2. Memory: three layers, different jobs
 
