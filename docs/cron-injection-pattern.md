@@ -13,23 +13,39 @@ A system cron entry fires a script that:
 ```bash
 #!/bin/bash
 # cron-inject.sh — ensure a session exists, then inject a prompt into it
-SESSION="claude-main"
-DIR="$HOME/main"
-PROMPT="$1"
+set -euo pipefail
 
-if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+PROJECT=main
+if ! [[ "$PROJECT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [[ "$PROJECT" == *..* ]]; then
+  echo "Invalid project name: $PROJECT" >&2
+  exit 1
+fi
+
+SESSION="claude-$PROJECT"
+DIR="$HOME/$PROJECT"
+PROMPT=${1:-}
+
+if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
   tmux new-session -d -s "$SESSION" -c "$DIR" \
-    "claude --continue --dangerously-skip-permissions -n main"
+    claude --continue --dangerously-skip-permissions -n "$PROJECT"
   sleep 30  # give Claude Code time to initialize before we type into it
 else
-  PANE_CMD=$(tmux display-message -t "$SESSION" -p '#{pane_current_command}' 2>/dev/null)
-  if [ "$PANE_CMD" = "bash" ] || [ "$PANE_CMD" = "sh" ]; then
-    tmux send-keys -t "$SESSION" "cd '$DIR' && claude --continue --dangerously-skip-permissions -n main" Enter
+  PANE_CMD=$(tmux display-message -t "=$SESSION" -p '#{pane_current_command}' 2>/dev/null || true)
+  if [ "$PANE_CMD" = "bash" ] || [ "$PANE_CMD" = "sh" ] || [ -z "$PANE_CMD" ]; then
+    tmux send-keys -t "=$SESSION" \
+      "cd $(printf '%q' "$DIR") && claude --continue --dangerously-skip-permissions -n $(printf '%q' "$PROJECT")" Enter
     sleep 30
   fi
 fi
 
-tmux send-keys -t "$SESSION" "$PROMPT" Enter
+PANE_CMD=$(tmux display-message -t "=$SESSION" -p '#{pane_current_command}' 2>/dev/null || true)
+if [ "$PANE_CMD" != "claude" ]; then
+  echo "Session $SESSION is not running Claude Code — refusing to send"
+  exit 1
+fi
+
+tmux send-keys -t "=$SESSION" -l "$PROMPT"
+tmux send-keys -t "=$SESSION" Enter
 ```
 
 Crontab entries then just call this with the prompt as an argument:
@@ -44,3 +60,4 @@ Crontab entries then just call this with the prompt as an argument:
 - **`aws`/other tools not found in cron's PATH.** Cron runs with a minimal environment — if a script calls `aws`, `node`, or anything installed via nvm/cargo/pip user-local paths, export `PATH` explicitly at the top of the script rather than relying on your shell profile.
 - **Silent stdin hang.** If a script invokes `claude -p "..."` non-interactively from cron, it can hang waiting on stdin. Redirect `< /dev/null` explicitly.
 - **`tmux send-keys` while the pane is mid-tool-call.** The typed text queues and gets submitted once Claude finishes the current turn — it doesn't interrupt. Usually fine for briefings; worth knowing if timing matters.
+- **Dangerous permissions.** The prompt lands in a pane running with `--dangerously-skip-permissions`, so only trusted cron entries should call this script.

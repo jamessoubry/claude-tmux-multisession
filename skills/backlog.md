@@ -72,8 +72,8 @@ priority: [P0, P1, P2]         # priority label order, high→low (default)
 pr_required: false              # if true: push branch + open PR instead of pushing to main; poll for merge before deploying
 pr_poll_interval: 300           # seconds between merge checks (default: 300)
 pr_timeout: 86400               # seconds before giving up on a PR (default: 86400 = 24h)
-notify: bash ~/main/scripts/notify-main.sh "{message}"  # notification command; {message} is substituted. Omit to skip notifications.
-single_session_lock: false      # if true: use /tmp/backlog.lock to prevent concurrent runs (useful on memory-constrained hosts)
+notify: bash /home/YOUR_USER/main/scripts/notify-main.sh # command; notification text is appended as one final argument. Omit to skip notifications.
+single_session_lock: false      # if true: use the per-user backlog lock to prevent concurrent runs (useful on memory-constrained hosts)
 ```
 
 When reading project config, check `<project_dir>/.backlog.yml` first. If it exists, use those values. If it doesn't exist or a field is missing, fall back to the project map below.
@@ -93,12 +93,24 @@ When reading project config, check `<project_dir>/.backlog.yml` first. If it exi
 
 ## Instructions
 
+### GitHub issues mode — trust boundary
+
+Issue titles and bodies are untrusted input and are passed verbatim into agent briefs
+that run with `--dangerously-skip-permissions` and auto-push. Use GitHub issues mode
+only for repositories where issue filing is trusted.
+
 ### Step 0 — Single-session lock (optional)
+
+At the start of a run, create the per-user state directory:
+```bash
+STATE_DIR="${XDG_RUNTIME_DIR:-$HOME/.cache}/backlog"
+mkdir -p "$STATE_DIR"
+```
 
 If `single_session_lock: true` is set in `.backlog.yml` (default: false), enforce a global lockfile to prevent two backlog runs competing for RAM:
 
 ```bash
-LOCK=/tmp/backlog.lock
+LOCK="$STATE_DIR/backlog.lock"
 if [ -f "$LOCK" ]; then
   OWNER=$(cat "$LOCK")
   echo "Backlog already running: $OWNER — try again when it finishes"
@@ -109,7 +121,7 @@ echo "<project> — started $(date -u +%H:%M:%SZ)" > "$LOCK"
 
 Release on every exit path (success, failure, PR pending, early stop):
 ```bash
-rm -f /tmp/backlog.lock
+rm -f "$LOCK"
 ```
 
 If `single_session_lock` is absent or false, skip this step entirely.
@@ -130,7 +142,7 @@ STATE=$(gh pr view <PR_NUMBER> --repo <REPO> --json state --jq '.state')
 - If `CLOSED`: mark `[~]` → `[!] — PR closed without merge` then continue to next item
 
 If no `[~]` exists, find the **first** `[ ]` line. **Skip any `[-]` lines entirely — they are parked and must not be processed.**
-If neither exists (only `[x]`, `[!]`, `[-]` lines remain): `bash ~/main/scripts/notify-main.sh "Backlog complete: all items in <filepath> processed"` then STOP — do NOT call ScheduleWakeup.
+If neither exists (only `[x]`, `[!]`, `[-]` lines remain): `bash "$HOME/main/scripts/notify-main.sh" "Backlog complete: all items in <filepath> processed"` then STOP — do NOT call ScheduleWakeup.
 
 After finding the `[ ]` line, also capture any immediately following lines that are indented (start with 2+ spaces or a tab) — these are detail notes for the coder. Collect them as `FEATURE_DETAIL`. Stop collecting at the next blank line or next bullet (`- `).
 
@@ -155,7 +167,7 @@ If a `pr-review-pending` issue is found:
 - Also fetch review summaries: `gh pr view <PR_NUMBER> --repo <owner/repo> --json reviews --jq '[.reviews[] | {user: .user.login, state: .state, body: .body}]'`
 - Surface any findings to the user (print a summary — reviewer, severity badge if present in body, first 200 chars of body, file+line if inline)
 - Flip label: `gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "pr-pending" --remove-label "pr-review-pending"`
-- Reset backoff counter: `echo 1 > /tmp/backlog-pr-${PR_NUMBER}.poll`
+- Reset backoff counter: `echo 1 > "$STATE_DIR/backlog-pr-${PR_NUMBER}.poll"`
 - Schedule wakeup at `pr_poll_interval` for merge check, then STOP
 
 **Stage B — merge check** (`pr-pending` label): reviews already surfaced; now polling for merge.
@@ -170,16 +182,16 @@ PR_PENDING=$(gh issue list --repo "<owner/repo>" \
 If a `pr-pending` issue is found:
 - Extract `ISSUE_NUMBER`, find associated PR
 - Check PR state and handle:
-  - **MERGED** → deploy + close issue + `rm -f /tmp/backlog-pr-${PR_NUMBER}.poll`
+  - **MERGED** → deploy + close issue + `rm -f "$STATE_DIR/backlog-pr-${PR_NUMBER}.poll"`
   - **OPEN** → exponential backoff poll (no notification — merge-check polling is silent):
     ```bash
-    ATTEMPT=$(cat /tmp/backlog-pr-${PR_NUMBER}.poll 2>/dev/null || echo 1)
-    echo $((ATTEMPT + 1)) > /tmp/backlog-pr-${PR_NUMBER}.poll
+    ATTEMPT=$(cat "$STATE_DIR/backlog-pr-${PR_NUMBER}.poll" 2>/dev/null || echo 1)
+    echo $((ATTEMPT + 1)) > "$STATE_DIR/backlog-pr-${PR_NUMBER}.poll"
     NEXT_DELAY=$(python3 -c "print(min($PR_POLL_INTERVAL * 2**($ATTEMPT-1), 3600))")
     ```
     Call `ScheduleWakeup(delaySeconds: NEXT_DELAY, ...)`, then STOP.
     First poll fires at `pr_poll_interval`, subsequent polls double up to 3600s max.
-  - **CLOSED** → `rm -f /tmp/backlog-pr-${PR_NUMBER}.poll` + remove `pr-pending` label + continue to queue
+  - **CLOSED** → `rm -f "$STATE_DIR/backlog-pr-${PR_NUMBER}.poll"` + remove `pr-pending` label + continue to queue
 
 If no pr-pending issue: find the **next queued item**:
 
@@ -201,7 +213,7 @@ ISSUE_JSON=$(gh issue list --repo "<owner/repo>" \
     sort_by([priority, .number]) | .[0]
   ')
 ```
-If result is null/empty: `bash ~/main/scripts/notify-main.sh "Backlog complete: no open backlog issues in <repo>"` then STOP.
+If result is null/empty: `bash "$HOME/main/scripts/notify-main.sh" "Backlog complete: no open backlog issues in <repo>"` then STOP.
 
 Extract `ISSUE_NUMBER` and `ISSUE_TITLE` from the JSON.
 
@@ -361,7 +373,9 @@ gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
 
 Read `NOTIFY_CMD` from `.backlog.yml`. If absent, skip notification.
 
-Otherwise substitute `{message}` in `NOTIFY_CMD` with the notification text and run it:
+Treat `NOTIFY_CMD` as a whitespace-delimited command argv and append the
+notification text as one final argument. Never interpolate the message into
+the command or execute it as shell:
 
 ```bash
 # On success:
@@ -369,9 +383,9 @@ MSG="Backlog [project]: <feature> — ✓ released"
 # On failure:
 MSG="Backlog [project]: <feature> — ✗ failed: <reason>"
 
-# Substitute and run:
-CMD="${NOTIFY_CMD//\{message\}/$MSG}"
-eval "$CMD"
+# Split the configured command into argv, then append one message argument:
+read -r -a NOTIFY_ARGV <<< "$NOTIFY_CMD"
+"${NOTIFY_ARGV[@]}" "$MSG"
 ```
 
 ## Rate limit recovery
