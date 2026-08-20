@@ -100,12 +100,19 @@ If `single_session_lock: true` is set in `.backlog.yml` (default: false), enforc
 ```bash
 LOCK=/tmp/backlog.lock
 if [ -f "$LOCK" ]; then
-  OWNER=$(cat "$LOCK")
-  echo "Backlog already running: $OWNER — try again when it finishes"
+  OWNER=$(cat "$LOCK") || OWNER="unknown (lockfile unreadable)"
+  echo "Backlog already running: $OWNER — try again when it finishes" >&2
   STOP
 fi
-echo "<project> — started $(date -u +%H:%M:%SZ)" > "$LOCK"
+if ! echo "<project> — started $(date -u +%H:%M:%SZ)" > "$LOCK"; then
+  echo "Could not write $LOCK — refusing to run unguarded" >&2
+  STOP
+fi
 ```
+
+If the lockfile cannot be written, STOP rather than continuing without the lock —
+the point of the lock is to prevent two runs competing, and an unguarded run
+silently defeats it.
 
 Release on every exit path (success, failure, PR pending, early stop):
 ```bash
@@ -123,8 +130,13 @@ If a `[~]` line exists:
 ```bash
 # Extract PR number and repo from the line, e.g. "PR #42 YOUR_GITHUB_USER/clawband"
 unset GITHUB_TOKEN
-STATE=$(gh pr view <PR_NUMBER> --repo <REPO> --json state --jq '.state')
+STATE=$(gh pr view <PR_NUMBER> --repo <REPO> --json state --jq '.state') \
+  || { echo "cannot read PR state (auth/network?) — leaving item as [~]" >&2; exit 1; }
 ```
+
+If `gh` fails, STOP and leave the item as `[~]`. Never fall through to "not merged"
+on an unknown state — a transient API failure would otherwise be recorded as a real
+outcome.
 - If `MERGED`: proceed to deploy (skip implement/test — jump straight to release/deploy step), then mark `[~]` → `[x]`
 - If `OPEN`: schedule a wakeup (`ScheduleWakeup(delaySeconds: PR_POLL_INTERVAL, prompt: "/backlog <same argument>", reason: "polling for PR #N merge")`), then STOP (no notification — merge-check polling is silent). Read `PR_POLL_INTERVAL` from `.backlog.yml` `pr_poll_interval` field (default: 600).
 - If `CLOSED`: mark `[~]` → `[!] — PR closed without merge` then continue to next item
@@ -146,7 +158,8 @@ Load `.backlog.yml` from the project dir (inferred from repo name) to get `BACKL
 unset GITHUB_TOKEN
 PR_REVIEW=$(gh issue list --repo "<owner/repo>" \
   --label "pr-review-pending" --state open --limit 1 \
-  --json number,title --jq '.[0]')
+  --json number,title --jq '.[0]') \
+  || { echo "gh issue list failed — aborting tick" >&2; exit 1; }
 ```
 
 If a `pr-review-pending` issue is found:
@@ -164,7 +177,8 @@ If a `pr-review-pending` issue is found:
 unset GITHUB_TOKEN
 PR_PENDING=$(gh issue list --repo "<owner/repo>" \
   --label "pr-pending" --state open --limit 1 \
-  --json number,title --jq '.[0]')
+  --json number,title --jq '.[0]') \
+  || { echo "gh issue list failed — aborting tick" >&2; exit 1; }
 ```
 
 If a `pr-pending` issue is found:
@@ -175,7 +189,8 @@ If a `pr-pending` issue is found:
     ```bash
     ATTEMPT=$(cat /tmp/backlog-pr-${PR_NUMBER}.poll 2>/dev/null || echo 1)
     echo $((ATTEMPT + 1)) > /tmp/backlog-pr-${PR_NUMBER}.poll
-    NEXT_DELAY=$(python3 -c "print(min($PR_POLL_INTERVAL * 2**($ATTEMPT-1), 3600))")
+    NEXT_DELAY=$(python3 -c "print(min($PR_POLL_INTERVAL * 2**($ATTEMPT-1), 3600))") \
+      || NEXT_DELAY=$PR_POLL_INTERVAL   # never schedule with an empty delay
     ```
     Call `ScheduleWakeup(delaySeconds: NEXT_DELAY, ...)`, then STOP.
     First poll fires at `pr_poll_interval`, subsequent polls double up to 3600s max.
@@ -199,9 +214,10 @@ ISSUE_JSON=$(gh issue list --repo "<owner/repo>" \
       elif contains([$p2]) then 3
       else 4 end;
     sort_by([priority, .number]) | .[0]
-  ')
+  ') || { echo "gh issue list failed — aborting tick" >&2; exit 1; }
 ```
-If result is null/empty: `bash ~/main/scripts/notify-main.sh "Backlog complete: no open backlog issues in <repo>"` then STOP.
+If the command **fails**, abort the tick — an API error is not an empty backlog.
+If it **succeeds** and the result is null/empty: `bash ~/main/scripts/notify-main.sh "Backlog complete: no open backlog issues in <repo>"` then STOP.
 
 Extract `ISSUE_NUMBER` and `ISSUE_TITLE` from the JSON.
 
@@ -212,13 +228,24 @@ Only reached if an item was found in Step 1.
 First, peek at the project config to check `pr_required`. Parse the `[tag]` from the item line to infer the project dir, then:
 ```bash
 python3 -c "
-import yaml, sys
+import sys, yaml
+path = '<project_dir>/.backlog.yml'
 try:
-    cfg = yaml.safe_load(open('<project_dir>/.backlog.yml'))
+    cfg = yaml.safe_load(open(path)) or {}
+except FileNotFoundError:
+    print(False)          # no config — documented default
+except Exception as e:
+    print('CONFIG_ERROR: %s: %s' % (path, e), file=sys.stderr)
+    sys.exit(1)           # malformed config must not be read as pr_required: false
+else:
     print(cfg.get('pr_required', False))
-except: print(False)
 "
 ```
+
+A missing `.backlog.yml` is a normal case (use the defaults). A *malformed* one is
+not: silently defaulting to `pr_required: false` would push straight to main on a
+project that requires PRs. If this command exits non-zero, report the config error
+and STOP without touching the item.
 
 **If `pr_required: true`**: skip ScheduleWakeup here (Step 2 is the implement-phase crash-recovery wakeup). The git state check in Step 6 handles mid-implement crashes. Wakeups for PR merge-polling are scheduled separately in Step 1 when an OPEN pr-pending PR is found.
 
@@ -241,8 +268,12 @@ This ensures recovery if the session exhausts the rolling window mid-tick.
 **GitHub issues mode:** `REPO` and `ISSUE_NUMBER` already known from Step 1. Add `in-progress` and remove `backlog` together:
 ```bash
 unset GITHUB_TOKEN
-gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "in-progress" --remove-label "backlog"
+gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "in-progress" --remove-label "backlog" \
+  || { echo "could not check out $REPO#$ISSUE_NUMBER — aborting before any code changes" >&2; exit 1; }
 ```
+
+Abort here if the label swap fails: without it the issue stays queued and a
+concurrent or later tick would implement the same item twice.
 
 Pass `ISSUE_NUMBER` and `REPO` into the workflow for coder and releaser.
 
@@ -251,14 +282,22 @@ Pass `ISSUE_NUMBER` and `REPO` into the workflow for coder and releaser.
 First, read project config. Check for `<project_dir>/.backlog.yml`:
 ```bash
 python3 -c "
-import yaml, sys
+import sys, yaml
+path = '<project_dir>/.backlog.yml'
 try:
-    cfg = yaml.safe_load(open('<project_dir>/.backlog.yml'))
+    cfg = yaml.safe_load(open(path)) or {}
+except FileNotFoundError:
+    print('NOT_FOUND')
+except Exception as e:
+    print('CONFIG_ERROR: %s: %s' % (path, e), file=sys.stderr)
+    sys.exit(1)
+else:
     print(yaml.dump(cfg))
-except: print('NOT_FOUND')
 "
 ```
 Use values from the YAML if present; fall back to the project map for any missing fields.
+As in Step 2, treat `NOT_FOUND` (no config file) as "use the fallback map" but treat a
+parse error as fatal — report it and STOP rather than running with silent defaults.
 Key values to resolve: `REPO`, `DEPLOY_CMD`, `BACKLOG_LABEL` (default: `backlog`), `PRIORITY_LABELS` (default: `[P0, P1, P2]`).
 
 Then read `<project_dir>/CLAUDE.md` to understand architecture, build commands, test commands, and deploy pipeline before dispatching agents.
@@ -268,13 +307,20 @@ Then read `<project_dir>/CLAUDE.md` to understand architecture, build commands, 
 **Before spawning any agents, check git state to detect a prior partial run** (e.g. from a session that was compacted mid-workflow). This makes recovery idempotent:
 
 ```bash
-cd "<project_dir>"
+cd "<project_dir>" || exit 1
 
 # Has the coder already committed for this feature?
-CODER_DONE=$(git log --oneline -5 | grep -i "\[backlog\]")
+# grep exiting 1 means "no match"; git itself failing means the state is unknown.
+CODER_DONE=$(git log --oneline -5 | grep -i "\[backlog\]") || CODER_DONE=""
 
 # Has the coder committed but the releaser not yet pushed?
-UNPUSHED=$(git log origin/main..HEAD --oneline 2>/dev/null | grep -i "\[backlog\]")
+# git log fails here when origin/main is absent (never fetched, renamed default
+# branch). An empty UNPUSHED means "already pushed", so a swallowed failure would
+# skip the release phase entirely — fetch first and abort if the ref is missing.
+git fetch origin main --quiet || { echo "cannot reach origin — aborting tick" >&2; exit 1; }
+git rev-parse --verify origin/main >/dev/null 2>&1 \
+  || { echo "origin/main not found — resolve the base branch before running" >&2; exit 1; }
+UNPUSHED=$(git log origin/main..HEAD --oneline | grep -i "\[backlog\]") || UNPUSHED=""
 ```
 
 - If `UNPUSHED` is non-empty: **coder and tester already ran** — skip straight to Phase 3 (Release) only
@@ -328,10 +374,16 @@ On **SUCCESS** (pr_required false, all phases passed):
 
 # GitHub (both modes)
 unset GITHUB_TOKEN
-gh issue close "$ISSUE_NUMBER" --repo "$REPO" --comment "✓ Released" 2>/dev/null || true
+gh issue close "$ISSUE_NUMBER" --repo "$REPO" --comment "✓ Released" \
+  || echo "WARN: could not close $REPO#$ISSUE_NUMBER — close it manually" >&2
 gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-  --remove-label "in-progress" --remove-label "backlog" 2>/dev/null || true
+  --remove-label "in-progress" --remove-label "backlog" \
+  || echo "WARN: could not clear labels on $REPO#$ISSUE_NUMBER — it will look in-progress" >&2
 ```
+
+Don't hide these failures: the deploy already happened, so an unreported label or
+close failure leaves the issue stuck `in-progress` and the next tick sees stale
+state. Include any warning in the Step 8 notification.
 
 On **PR_PENDING** (pr_required true, PR opened successfully):
 ```bash
@@ -352,10 +404,15 @@ On **FAILURE** (any phase failed):
 
 # GitHub (both modes) — backlog already removed in Step 4; just swap in-progress for failed
 unset GITHUB_TOKEN
-gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "✗ Failed: <reason>"
+gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "✗ Failed: <reason>" \
+  || echo "WARN: could not comment on $REPO#$ISSUE_NUMBER" >&2
 gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-  --add-label "failed" --remove-label "in-progress" 2>/dev/null || true
+  --add-label "failed" --remove-label "in-progress" \
+  || echo "WARN: could not mark $REPO#$ISSUE_NUMBER failed — it stays in-progress" >&2
 ```
+
+A failure to record the failure is itself reportable — surface it in the Step 8
+notification so the item doesn't sit `in-progress` forever unnoticed.
 
 ### Step 8 — Notify
 
@@ -371,8 +428,12 @@ MSG="Backlog [project]: <feature> — ✗ failed: <reason>"
 
 # Substitute and run:
 CMD="${NOTIFY_CMD//\{message\}/$MSG}"
-eval "$CMD"
+eval "$CMD" || echo "WARN: notification command failed: $CMD" >&2
 ```
+
+If the notify command fails, print the warning *and* the message it was carrying to
+stdout — an unnotified outcome is otherwise indistinguishable from no outcome at all.
+Include any Step 7 state-update warnings in `MSG`.
 
 ## Rate limit recovery
 
