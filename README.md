@@ -86,6 +86,17 @@ I compared this against Claude Code's built-in `SendMessage`/`ListAgents` cross-
 
 The pieces above run inside a live tmux session — they die on reboot unless something re-creates them. I use a system crontab entry that checks whether the tmux session exists and, if not, recreates it via `claude.sh` before injecting a scheduled prompt (`tmux send-keys`). See `docs/cron-injection-pattern.md` for the pattern (not included as a runnable script here since it's tightly coupled to what you're scheduling).
 
+## Tests
+
+The two shell scripts are covered by [bats](https://github.com/bats-core/bats-core) unit tests in `tests/`:
+
+```bash
+sudo apt-get install -y bats   # or: brew install bats-core
+bats tests
+```
+
+Each test runs against a throwaway `$HOME` and a `$PATH` full of recording stubs for `tmux`, `lcm`, `specstory` and `claude`, so nothing attaches to a real session or touches your machine — the assertions are on the exact commands the scripts would have run. `claude.sh` is rendered into the sandbox with its `YOUR_USER` placeholder substituted, the same way you install it.
+
 ## What's NOT in this repo
 
 Deliberately excluded because it's either secrets or too personal-infra-specific to be a useful template: notification tokens, AWS account details, actual backlog contents, actual CLAUDE.md files. Use the pattern, bring your own config.
