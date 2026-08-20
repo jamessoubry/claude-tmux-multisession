@@ -38,7 +38,7 @@ Why tmux and not just multiple terminal tabs: sessions survive SSH disconnects, 
 
 The script also starts the LCM daemon and kicks off a SpecStory sync in the background before attaching — so memory and history capture are always warm.
 
-**Set up:** edit `YOUR_USER` in `scripts/claude.sh`, drop it somewhere on your `$PATH` (or alias it), install [tmux](https://github.com/tmux/tmux) if you don't have it.
+**Set up:** edit `YOUR_USER` in `scripts/claude.sh` (or export `CLAUDE_HOME_USER` — the script refuses to run while the placeholder is unset), drop it somewhere on your `$PATH` (or alias it), install [tmux](https://github.com/tmux/tmux) if you don't have it.
 
 ## 2. Memory: three layers, different jobs
 
@@ -85,6 +85,18 @@ I compared this against Claude Code's built-in `SendMessage`/`ListAgents` cross-
 ## 7. Surviving reboots
 
 The pieces above run inside a live tmux session — they die on reboot unless something re-creates them. I use a system crontab entry that checks whether the tmux session exists and, if not, recreates it via `claude.sh` before injecting a scheduled prompt (`tmux send-keys`). See `docs/cron-injection-pattern.md` for the pattern (not included as a runnable script here since it's tightly coupled to what you're scheduling).
+
+## Error handling conventions
+
+These scripts run unattended (cron, background sessions), so a swallowed error means
+a job that silently never ran. The convention across `scripts/`, `docs/`, and the
+`/backlog` skill:
+
+- `set -euo pipefail` in every script; diagnostics go to stderr, exit codes are non-zero on failure.
+- Optional integrations (`lcm`, `specstory`) are skipped when not installed, but a tool that *is* installed and fails prints its output as a warning instead of being discarded.
+- Async work logs to a file (`$TMPDIR/specstory-sync-<project>.log`) and its failure is reported on the next run rather than lost.
+- `tmux` calls (`new-session`, `send-keys`, `display-message`) are checked — including a post-create check that the session didn't die immediately.
+- In `/backlog`, an API/config failure is never treated as a state answer: a failed `gh issue list` aborts the tick instead of reading as "backlog complete", and a malformed `.backlog.yml` is fatal instead of defaulting to `pr_required: false`.
 
 ## What's NOT in this repo
 
