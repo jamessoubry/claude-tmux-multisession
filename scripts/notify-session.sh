@@ -10,6 +10,8 @@
 # is already mid-turn. It also lands in tmux scrollback, so you get a free
 # audit log of cross-session coordination.
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/claude-session.sh"
+
 SESSION=$1
 MSG=$2
 
@@ -18,19 +20,14 @@ if [ -z "$SESSION" ] || [ -z "$MSG" ]; then
   exit 1
 fi
 
-TMUX_SESSION="claude-${SESSION}"
+TMUX_SESSION=$(session_name "$SESSION")
 FROM="${CLAUDE_SESSION_NAME:-main}"
 FULL_MSG="[from:${FROM}] ${MSG}"
 
-if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+if ! session_exists "$TMUX_SESSION"; then
   echo "Session $TMUX_SESSION not found — is it running?"
   exit 1
 fi
 
-# tmux doesn't reliably register Enter when sent in the same send-keys call
-# as the text (known tmux quirk: https://github.com/tmux/tmux/issues/1778).
-# Split into two calls with a short delay.
-tmux send-keys -t "$TMUX_SESSION" -l "$FULL_MSG"
-sleep 0.5
-tmux send-keys -t "$TMUX_SESSION" Enter
+send_to_session "$TMUX_SESSION" "$FULL_MSG"
 echo "Sent to $TMUX_SESSION: $FULL_MSG"

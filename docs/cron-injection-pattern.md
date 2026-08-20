@@ -10,26 +10,22 @@ A system cron entry fires a script that:
 2. If not, recreates it using the same launch logic as your `claude.sh` (start LCM daemon, `claude --continue --dangerously-skip-permissions`, wait for init)
 3. Injects the scheduled prompt via `tmux send-keys`
 
+The session-name convention, the "is Claude actually running in this pane" check, the relaunch and the send-keys quirk all live in `scripts/lib/claude-session.sh`, so the cron script is just a few calls into it:
+
 ```bash
 #!/bin/bash
 # cron-inject.sh — ensure a session exists, then inject a prompt into it
-SESSION="claude-main"
-DIR="$HOME/main"
+source ~/scripts/lib/claude-session.sh   # wherever you dropped the scripts
+
+PROJECT=main
 PROMPT="$1"
 
-if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-  tmux new-session -d -s "$SESSION" -c "$DIR" \
-    "claude --continue --dangerously-skip-permissions -n main"
-  sleep 30  # give Claude Code time to initialize before we type into it
-else
-  PANE_CMD=$(tmux display-message -t "$SESSION" -p '#{pane_current_command}' 2>/dev/null)
-  if [ "$PANE_CMD" = "bash" ] || [ "$PANE_CMD" = "sh" ]; then
-    tmux send-keys -t "$SESSION" "cd '$DIR' && claude --continue --dangerously-skip-permissions -n main" Enter
-    sleep 30
-  fi
-fi
+SESSION=$(session_name "$PROJECT")
+DIR=$(project_dir "$PROJECT")
 
-tmux send-keys -t "$SESSION" "$PROMPT" Enter
+# $CLAUDE_INIT_WAIT (default 30s) gives Claude Code time to initialize before we type
+ensure_session "$SESSION" "$DIR" "$(claude_cmd "$PROJECT" --continue)" "$CLAUDE_INIT_WAIT"
+send_to_session "$SESSION" "$PROMPT"
 ```
 
 Crontab entries then just call this with the prompt as an argument:

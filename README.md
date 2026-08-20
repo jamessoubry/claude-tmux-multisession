@@ -38,7 +38,9 @@ Why tmux and not just multiple terminal tabs: sessions survive SSH disconnects, 
 
 The script also starts the LCM daemon and kicks off a SpecStory sync in the background before attaching — so memory and history capture are always warm.
 
-**Set up:** edit `YOUR_USER` in `scripts/claude.sh`, drop it somewhere on your `$PATH` (or alias it), install [tmux](https://github.com/tmux/tmux) if you don't have it.
+**Set up:** drop `scripts/claude.sh` somewhere on your `$PATH` (or alias it), keeping `scripts/lib/claude-session.sh` next to it in a `lib/` subdirectory, and install [tmux](https://github.com/tmux/tmux) if you don't have it. Project dirs default to `$HOME/<project>`; set `CLAUDE_PROJECT_ROOT` if yours live elsewhere.
+
+`scripts/lib/claude-session.sh` is the shared library both scripts (and the cron pattern below) source — it owns the `claude-<project>` naming, project-dir resolution, the "is Claude Code actually running in this pane" check and relaunch, and the two-call `send-keys` workaround. Change a convention there and everything follows.
 
 ## 2. Memory: three layers, different jobs
 
