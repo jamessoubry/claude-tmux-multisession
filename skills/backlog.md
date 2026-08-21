@@ -283,11 +283,19 @@ UNPUSHED=$(git log origin/main..HEAD --oneline 2>/dev/null | grep -i "\[backlog\
 
 Run the three phases as sequential Agent tool calls (NOT the Workflow tool — agents consistently struggle to write Workflow scripts inline and fall back to Agent calls anyway; just use Agent directly).
 
+**Timestamp every phase** (this is a long-running, easy-to-lose-track-of pipeline — log so elapsed time is always visible, even after tabbing away):
+```bash
+LOG="<project_dir>/../logs/backlog-<project>.log"
+mkdir -p "$(dirname "$LOG")"
+echo "[$(date -u +%H:%M:%SZ)] <feature> — starting Phase 1: Implement" | tee -a "$LOG"
+```
+Print the same `⏱ HH:MM:SS — <what's starting>` line to chat output too, not just the log file — before Phase 1, before Phase 2, before Phase 3, and once more when the pipeline finishes (success or failure) with the end time. Reuse the same `$LOG` path for every phase in this tick so a `tail -f` on that file shows live progress across the whole pipeline.
+
 **Cost tiering** (borrowed from the [Ringer](https://github.com/NateBJones-Projects/ringer) swarm-orchestrator pattern — expensive model plans/reviews, cheap workers implement): Phase 1 (Implement) and Phase 2 (Test) are mechanical, well-specified work off a clear brief — spawn them with `model: "haiku"`. Phase 3 (Release) is the last gate before something ships (git push to main, deploy commands) — keep it on the default/calling model, no override. If a Haiku-implemented feature is genuinely complex or the FEATURE_DETAIL signals real ambiguity, drop the override and let it run on the calling session's default model instead — don't force Haiku on tasks it's likely to get wrong, the point is cost savings on the routine cases, not blind downgrading.
 
 **Phase 1 — Implement**
 
-Spawn an Agent (`model: "haiku"` — see cost tiering above) with this brief:
+Log/print `⏱ HH:MM:SS — starting Phase 1: Implement` (see timestamp note above) before spawning. Spawn an Agent (`model: "haiku"` — see cost tiering above) with this brief:
 - Read the project CLAUDE.md and relevant source files, then implement the feature
 - Feature: `<feature>` (plain English title/description from the backlog line)
 - If `FEATURE_DETAIL` is set, pass it verbatim as additional context (file paths, constraints, acceptance criteria)
@@ -300,14 +308,14 @@ Spawn an Agent (`model: "haiku"` — see cost tiering above) with this brief:
 
 **Phase 2 — Test**
 
-Only run if Phase 1 returned DONE. Spawn an Agent (`model: "haiku"`) with this brief:
+Only run if Phase 1 returned DONE. Log/print `⏱ HH:MM:SS — Phase 1 done, starting Phase 2: Test` before spawning. Spawn an Agent (`model: "haiku"`) with this brief:
 - Run the project's full test suite
 - Verify the new tests pass and no regressions are introduced
 - Return "PASSED" or "FAILED: <details>"
 
 **Phase 3 — Release**
 
-Only run if Phase 2 returned PASSED. Behaviour depends on `pr_required` from `.backlog.yml`:
+Only run if Phase 2 returned PASSED. Log/print `⏱ HH:MM:SS — Phase 2 passed, starting Phase 3: Release` before spawning. Behaviour depends on `pr_required` from `.backlog.yml`:
 
 **`pr_required: false` (default):** Spawn an Agent with this brief:
 - `unset GITHUB_TOKEN && git push` direct to main
@@ -320,6 +328,8 @@ Only run if Phase 2 returned PASSED. Behaviour depends on `pr_required` from `.b
 - Return "PR_PENDING: <pr_number>"
 
 ### Step 7 — Update state
+
+Log/print `⏱ HH:MM:SS — pipeline finished: <SUCCESS|PR_PENDING|FAILURE>` (same `$LOG` file as the phase timestamps) before doing anything else in this step — this closes out the elapsed-time trail regardless of outcome.
 
 On **SUCCESS** (pr_required false, all phases passed):
 ```bash
