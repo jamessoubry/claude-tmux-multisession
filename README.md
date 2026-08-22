@@ -18,6 +18,7 @@ Running one Claude Code session per project (instead of one giant session, or re
 | **[QMD](https://github.com/tobi/qmd)** | Local hybrid search (BM25 + vector + LLM rerank) over your whole workspace/knowledge base | tobi/qmd |
 | **[SpecStory](https://github.com/specstoryai/getspecstory)** | Converts Claude Code JSONL session logs into git-friendly markdown per project | specstoryai/getspecstory |
 | **[RTK](https://github.com/rtk-ai/rtk)** | CLI proxy that compresses shell output before it reaches the model — 60–90% token savings on `git`/`cargo`/`docker`/etc | rtk-ai/rtk |
+| **[sqz](https://github.com/ojuschugh1/sqz) (MCP proxy only)** | Wraps an MCP server (e.g. `github`) and compresses *its* JSON responses — a capability RTK doesn't have at all | ojuschugh1/sqz |
 | **[clawband](https://github.com/jamessoubry/clawband)** | Rust PreToolUse hook — blocks/asks on destructive shell commands before Claude Code runs them | jamessoubry/clawband (mine) |
 | **`/backlog` skill** | Self-pacing agent that works a markdown or GitHub-issues backlog one item at a time, with crash recovery via `ScheduleWakeup` | this repo (`skills/backlog.md`) |
 | **`notify-session.sh`** | Cross-session messaging via `tmux send-keys` — one session can wake/notify another, logged in scrollback | this repo |
@@ -50,9 +51,27 @@ The mistake is treating "AI memory" as one problem. It's three:
 
 See `docs/memory-architecture.md` for the full breakdown, including how they're wired into `CLAUDE.md`.
 
-## 3. Token cost: RTK
+## 3. Token cost: RTK for the shell, sqz for MCP servers
 
 [RTK](https://github.com/rtk-ai/rtk) sits between your shell and Claude via a PreToolUse-style rewrite: `git status` silently becomes `git status | rtk compress` (or similar), cutting typical dev-command output by 60–90% with no behaviour change from your side. Single Rust binary, no daemon, install once.
+
+I evaluated [sqz](https://github.com/ojuschugh1/sqz) as a full RTK replacement (same PreToolUse-hook role) and it lost decisively on real tests: `grep` output 47KB→1.8KB with RTK (96%) vs 47KB→24.6KB with sqz (48%); a passing `cargo test` run 42.8KB→43 bytes with RTK (99.9%, collapses to a pass/fail summary) vs 42.8KB→42.7KB with sqz (10%). RTK's per-command formatters understand semantics (hide passing-test noise, cap grep match counts); sqz's `compress` is a generic text-compression pass with no command-specific awareness. Keep RTK for the shell hook.
+
+Where sqz *does* win, and RTK has zero equivalent: `sqz-mcp proxy` wraps another MCP server and compresses its JSON responses. A real `list_issues` call through a plain `github` MCP server hit 66.5KB and **failed outright** — exceeded Claude Code's per-call token limit, had to be dumped to a file for manual chunked reading. The identical call through `sqz-mcp proxy -- npx -y @modelcontextprotocol/server-github` succeeded inline in one shot, using dictionary-substitution compression on the repeated JSON field names. That's not a percentage improvement, it's the difference between a call that works and one that doesn't. Config:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "sqz-mcp",
+      "args": ["proxy", "--", "npx", "-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "..." }
+    }
+  }
+}
+```
+
+Net setup: RTK on the Bash `PreToolUse` hook, sqz only wrapping MCP servers likely to return large result sets (issue lists, PR search, commit history). Neither tool replaces the other — they solve different problems.
 
 ## 4. Safety: clawband
 
