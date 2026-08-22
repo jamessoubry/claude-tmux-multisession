@@ -74,7 +74,10 @@ pr_poll_interval: 300           # seconds between merge checks (default: 300)
 pr_timeout: 86400               # seconds before giving up on a PR (default: 86400 = 24h)
 notify: bash ~/main/scripts/notify-main.sh "{message}"  # notification command; {message} is substituted. Omit to skip notifications.
 single_session_lock: false      # if true: use /tmp/backlog.lock to prevent concurrent runs (useful on memory-constrained hosts)
+haiku_tiering: true             # if false: Phase 1/2 run on the default/calling model instead of Haiku (default: true)
 ```
+
+**`haiku_tiering: false`** — set this for projects where implementation tasks require real judgement, not rote mechanical work (e.g. a security hook parsing/scanning logic, not CRUD boilerplate). Real-world failure: Haiku correctly implemented a 365-line feature but stalled before running `git commit` — it can generate code but is unreliable at the multi-step wrap-up (fmt → test → commit) that closes out a task. The cost tiering saves tokens on the happy path but costs manual cleanup when it silently drops the ball, which is worse for a project where correctness matters more than speed.
 
 When reading project config, check `<project_dir>/.backlog.yml` first. If it exists, use those values. If it doesn't exist or a field is missing, fall back to the project map below.
 
@@ -291,7 +294,7 @@ echo "[$(date -u +%H:%M:%SZ)] <feature> — starting Phase 1: Implement" | tee -
 ```
 Print the same `⏱ HH:MM:SS — <what's starting>` line to chat output too, not just the log file — before Phase 1, before Phase 2, before Phase 3, and once more when the pipeline finishes (success or failure) with the end time. Reuse the same `$LOG` path for every phase in this tick so a `tail -f` on that file shows live progress across the whole pipeline.
 
-**Cost tiering** (borrowed from the [Ringer](https://github.com/NateBJones-Projects/ringer) swarm-orchestrator pattern — expensive model plans/reviews, cheap workers implement): Phase 1 (Implement) and Phase 2 (Test) are mechanical, well-specified work off a clear brief — spawn them with `model: "haiku"`. Phase 3 (Release) is the last gate before something ships (git push to main, deploy commands) — keep it on the default/calling model, no override. If a Haiku-implemented feature is genuinely complex or the FEATURE_DETAIL signals real ambiguity, drop the override and let it run on the calling session's default model instead — don't force Haiku on tasks it's likely to get wrong, the point is cost savings on the routine cases, not blind downgrading.
+**Cost tiering** (borrowed from the [Ringer](https://github.com/NateBJones-Projects/ringer) swarm-orchestrator pattern — expensive model plans/reviews, cheap workers implement): Phase 1 (Implement) and Phase 2 (Test) are mechanical, well-specified work off a clear brief — spawn them with `model: "haiku"`, unless `haiku_tiering: false` is set in `.backlog.yml` for this project (see Project config above), in which case run them on the default/calling model instead. Phase 3 (Release) is the last gate before something ships (git push to main, deploy commands) — always keep it on the default/calling model, no override. If a Haiku-implemented feature is genuinely complex or the FEATURE_DETAIL signals real ambiguity, drop the override and let it run on the calling session's default model instead — don't force Haiku on tasks it's likely to get wrong, the point is cost savings on the routine cases, not blind downgrading.
 
 **Phase 1 — Implement**
 
@@ -315,7 +318,11 @@ Only run if Phase 1 returned DONE. Log/print `⏱ HH:MM:SS — Phase 1 done, sta
 
 **Phase 3 — Release**
 
-Only run if Phase 2 returned PASSED. Log/print `⏱ HH:MM:SS — Phase 2 passed, starting Phase 3: Release` before spawning. Behaviour depends on `pr_required` from `.backlog.yml`:
+Only run if Phase 2 returned PASSED. Log/print `⏱ HH:MM:SS — Phase 2 passed, starting Phase 3: Release` before spawning.
+
+**Never give the Release agent a blocking/watch command** (e.g. `gh pr checks --watch`, `gh run watch`) as part of its brief — a dispatched subagent can hit a context or idle limit mid-wait and stop silently before finishing its actual job. The Release agent's job ends the moment the push/PR-create call returns — CI/merge monitoring happens afterwards via the orchestrator's own ScheduleWakeup-driven poll cycle (see Step 1 GitHub issues mode), not inside the phase.
+
+Behaviour depends on `pr_required` from `.backlog.yml`:
 
 **`pr_required: false` (default):** Spawn an Agent with this brief:
 - `unset GITHUB_TOKEN && git push` direct to main
