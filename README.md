@@ -76,7 +76,9 @@ Net setup: RTK on the Bash `PreToolUse` hook, sqz only wrapping MCP servers like
 
 ## 4. Safety: clawband
 
-[clawband](https://github.com/jamessoubry/clawband) is a Rust PreToolUse hook I wrote — it inspects every shell command Claude Code is about to run and blocks or asks-for-confirmation on destructive patterns (`rm -rf`, force-pushes, `crontab` overwrites, etc.) before they execute. Runs alongside `--dangerously-skip-permissions` mode so you get autonomy without giving up a safety net. Fully open, PRs welcome for new patterns.
+[clawband](https://github.com/jamessoubry/clawband) is a Rust PreToolUse hook I wrote — it inspects every shell command Claude Code is about to run and blocks or asks-for-confirmation on destructive patterns (`rm -rf`, force-pushes, `crontab` overwrites, etc.) before they execute. On this repo's own always-on box, Claude Code runs with `--dangerously-skip-permissions` ("yolo mode") for unattended/cron work, and clawband is what makes that survivable — it's the only safety net once Claude Code's own permission prompts are off.
+
+**With normal permissions on (not yolo)** — the default for interactive work, e.g. a work laptop — clawband still earns its place, just for a different reason: it's a hard, pattern-matched DENY tier that Claude Code's own permission system doesn't have (a generic "allow this tool call?" prompt doesn't tell you it matched `rm -rf` specifically, and can be approved on autopilot), and it collapses the ASK tier to one clear reason instead of a wall of individual per-command prompts. Standalone binary, no daemon — applies identically on a laptop or a server.
 
 ## 5. Autonomous backlog work: `/backlog`
 
