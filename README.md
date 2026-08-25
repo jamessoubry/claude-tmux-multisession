@@ -20,6 +20,7 @@ Running one Claude Code session per project (instead of one giant session, or re
 | **[RTK](https://github.com/rtk-ai/rtk)** | CLI proxy that compresses shell output before it reaches the model — 60–90% token savings on `git`/`cargo`/`docker`/etc | rtk-ai/rtk |
 | **[sqz](https://github.com/ojuschugh1/sqz) (MCP proxy only)** | Wraps an MCP server (e.g. `github`) and compresses *its* JSON responses — a capability RTK doesn't have at all | ojuschugh1/sqz |
 | **[clawband](https://github.com/jamessoubry/clawband)** | Rust PreToolUse hook — blocks/asks on destructive shell commands before Claude Code runs them | jamessoubry/clawband (mine) |
+| **[compact-plus](https://github.com/u-ichi/compact-plus)** | Laptop-only alternative to LCM's SessionStart injection: PreCompact hook writes a 10-section state file, SessionStart(compact) re-injects it — no database, no daemon | u-ichi/compact-plus |
 | **`/backlog` skill** | Self-pacing agent that works a markdown or GitHub-issues backlog one item at a time, with crash recovery via `ScheduleWakeup` | this repo (`skills/backlog.md`) |
 | **`notify-session.sh`** | Cross-session messaging via `tmux send-keys` — one session can wake/notify another, logged in scrollback | this repo |
 
@@ -104,6 +105,38 @@ I compared this against Claude Code's built-in `SendMessage`/`ListAgents` cross-
 ## 7. Surviving reboots
 
 The pieces above run inside a live tmux session — they die on reboot unless something re-creates them. I use a system crontab entry that checks whether the tmux session exists and, if not, recreates it via `claude.sh` before injecting a scheduled prompt (`tmux send-keys`). See `docs/cron-injection-pattern.md` for the pattern (not included as a runnable script here since it's tightly coupled to what you're scheduling).
+
+## 8. Laptop setup: no server, no daemon
+
+Everything above assumes an always-on box (a home server, a cloud VM) where a background daemon like LCM makes sense — it just runs, forever, and catches up on its own. A laptop that's suspended and restarted constantly through the day is a different shape of problem, and running the same stack on it is the wrong move, not just a smaller version of the right one.
+
+**The guiding principle:** durable files on disk are the source of truth; any running process — daemon, index, cache — is disposable and rebuildable from those files. (This is the same idea behind [walgit](https://github.com/tobi/walgit)'s object-storage-backed git server: the write-ahead log in durable storage is truth, every server instance is a disposable cache. Applied to a laptop, "durable storage" is just the local disk, and "disposable cache" is anything that needs a daemon running to stay current.)
+
+**What changes vs. the server setup:**
+
+- **No LCM.** Technically LCM *can* work fine on a laptop — Claude Code writes its own session transcripts to disk regardless of whether any daemon is running, so nothing is lost by the daemon being off; it just needs to catch up (`lcm import`) whenever a session starts. But if you're trying to avoid scattered state and secrets across machines, skip it — the pieces below cover the same ground with less moving infrastructure.
+- **SpecStory is the recall mechanism, not just an archive.** On the server setup above, SpecStory output can be treated as pure audit trail. On the laptop, it's what you and Claude actually search when you need to recall something from a past session. Keep it indexed in QMD:
+  ```bash
+  qmd collection add ~/path/to/specstory-output --name specstory
+  ```
+  (Contrast: on an always-on box where LCM already owns recall, exclude SpecStory from QMD's default queries instead — `qmd collection exclude specstory` — so you're not paying to search the same history twice through two different tools. Which way round it goes depends entirely on what your recall layer actually is.)
+- **compact-plus replaces LCM's SessionStart injection.** It's the one piece that doesn't have a laptop-friendly equivalent lying around already — LCM's "summarize before compaction, inject after" behavior needed a real replacement, not just a lighter version. compact-plus does exactly that and nothing else: no search, no recall, no database — a PreCompact hook writes a 10-section state file (active plan, decisions, blockers, failed attempts), a SessionStart(compact) hook re-injects it once. Pure files in `$TMPDIR`, no daemon.
+  ```bash
+  claude plugin marketplace add u-ichi/compact-plus --scope user
+  claude plugin install compact-plus@compact-plus
+  ```
+  It calls out to an LLM to generate that state summary on every compaction (default `claude -p`), which is a real per-compaction cost — tune it down if that matters:
+  ```json
+  {
+    "env": {
+      "COMPACT_PLUS_PRIMARY_BACKEND": "claude -p --model claude-haiku-4-5-20251001 --effort low --permission-mode dontAsk --output-format text --no-session-persistence --system-prompt \"$SYSTEM_PROMPT\""
+    }
+  }
+  ```
+- **RTK still applies, unchanged.** It's a single binary with no daemon — the laptop/server distinction that matters for LCM doesn't apply to it at all. Same install, same win.
+- **If anything here ends up SQLite-backed** (QMD's own index does), keep its data directory *outside* whatever a cloud sync client (OneDrive, iCloud, Dropbox, Syncthing) watches. Sync tools don't understand SQLite's WAL/shm sidecar files and can upload a torn mid-write snapshot or fight the SQLite process for the file — a real, documented failure mode, not a theoretical one (see: reports of exactly this corrupting Logseq's DB-backed graphs over Syncthing).
+
+Net laptop stack: SpecStory (capture + recall, via QMD) + QMD (search) + compact-plus (compaction continuity) + RTK (shell token cost) + clawband (safety). No daemon that needs to survive a reboot, no server, no secrets beyond what each tool already needs on its own.
 
 ## What's NOT in this repo
 
