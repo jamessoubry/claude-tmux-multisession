@@ -16,7 +16,7 @@ Running one Claude Code session per project (instead of one giant session, or re
 | **[LCM](https://github.com/lossless-claude/lcm)** | Auto-captures every session, compacts to a DAG, promotes durable findings to cross-session memory | lossless-claude/lcm |
 | **[ICM](https://github.com/rtk-ai/icm)** | Manual, tagged, high-signal memory store — decisions, resolved errors, preferences | rtk-ai/icm |
 | **[QMD](https://github.com/tobi/qmd)** | Local hybrid search (BM25 + vector + LLM rerank) over your whole workspace/knowledge base | tobi/qmd |
-| **[SpecStory](https://github.com/specstoryai/getspecstory)** | Converts Claude Code JSONL session logs into git-friendly markdown per project | specstoryai/getspecstory |
+| **[SpecStory](https://github.com/specstoryai/getspecstory)** | Converts Claude Code JSONL session logs into git-friendly markdown; hooked into SessionStart/PreCompact/Stop so transcripts stay current | specstoryai/getspecstory |
 | **[RTK](https://github.com/rtk-ai/rtk)** | CLI proxy that compresses shell output before it reaches the model — 60–90% token savings on `git`/`cargo`/`docker`/etc | rtk-ai/rtk |
 | **[sqz](https://github.com/ojuschugh1/sqz) (MCP proxy only)** | Wraps an MCP server (e.g. `github`) and compresses *its* JSON responses — a capability RTK doesn't have at all | ojuschugh1/sqz |
 | **[clawband](https://github.com/jamessoubry/clawband)** | Rust PreToolUse hook — blocks/asks on destructive shell commands before Claude Code runs them | jamessoubry/clawband (mine) |
@@ -118,10 +118,8 @@ Everything above assumes an always-on box (a home server, a cloud VM) where a ba
 **What changes vs. the server setup:**
 
 - **No LCM.** Technically LCM *can* work fine on a laptop — Claude Code writes its own session transcripts to disk regardless of whether any daemon is running, so nothing is lost by the daemon being off; it just needs to catch up (`lcm import`) whenever a session starts. But if you're trying to avoid scattered state and secrets across machines, skip it — the pieces below cover the same ground with less moving infrastructure.
-- **SpecStory is the recall mechanism, not just an archive.** On the server setup above, SpecStory output can be treated as pure audit trail. On the laptop, it's what you and Claude actually search when you need to recall something from a past session. Keep it indexed in QMD:
-  ```bash
-  qmd collection add ~/path/to/specstory-output --name specstory
-  ```
+- **SpecStory is the recall mechanism, not just an archive.** On the server setup above, SpecStory output can be treated as pure audit trail. On the laptop, it's what you and Claude actually search when you need to recall something from a past session. Wire up the sync hook and index the output in QMD — see "SpecStory + qmd wiring" below.
+
   (Contrast: on an always-on box where LCM already owns recall, exclude SpecStory from QMD's default queries instead — `qmd collection exclude specstory` — so you're not paying to search the same history twice through two different tools. Which way round it goes depends entirely on what your recall layer actually is.)
 - **compact-plus replaces LCM's SessionStart injection.** It's the one piece that doesn't have a laptop-friendly equivalent lying around already — LCM's "summarize before compaction, inject after" behavior needed a real replacement, not just a lighter version. compact-plus does exactly that and nothing else: no search, no recall, no database — a PreCompact hook writes a 10-section state file (active plan, decisions, blockers, failed attempts), a SessionStart(compact) hook re-injects it once. Pure files in `$TMPDIR`, no daemon.
   ```bash
@@ -180,7 +178,61 @@ launchctl load ~/Library/LaunchAgents/com.user.claude-session.plist
 
 Net laptop stack: SpecStory (capture + recall, via QMD) + QMD (search) + compact-plus (compaction continuity) + RTK (shell token cost) + clawband (safety). No daemon that needs to survive a reboot, no server, no secrets beyond what each tool already needs on its own.
 
-## 9. Status line
+## 9. SpecStory + qmd wiring
+
+SpecStory converts Claude Code's JSONL session logs into readable markdown. QMD indexes those files so Claude can search across all past sessions in one `qmd query` call rather than reading whole transcripts.
+
+**Install:**
+
+```bash
+npm install -g @tobilu/qmd        # or: bun install -g @tobilu/qmd
+brew install sqlite               # macOS: required for qmd's SQLite extensions
+npm install -g @specstoryai/specstory-cli
+```
+
+**One-time collection setup:**
+
+```bash
+qmd collection add ~/.claude/History --name specstory
+qmd context add qmd://specstory "Claude Code session transcripts — past debugging sessions, architecture decisions, and investigations"
+
+qmd collection add ~/.claude/Clippings --name clippings
+qmd context add qmd://clippings "Investigation notes and findings — bug root causes, incident analyses, architecture decisions"
+
+qmd embed
+```
+
+**Hook wiring** — `scripts/specstory-sync.sh` (included in this repo) runs SpecStory sync then kicks off `qmd embed` in the background. Wire it into `~/.claude/settings.json` on three events:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/specstory-sync.sh", "timeout": 60, "async": true }] }],
+    "PreCompact":   [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/specstory-sync.sh", "timeout": 60, "async": true }] }],
+    "Stop":         [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/specstory-sync.sh", "timeout": 60, "async": true }] }]
+  }
+}
+```
+
+Copy `scripts/specstory-sync.sh` to `~/.claude/hooks/specstory-sync.sh` and edit the `sync_from` lines to point at your project directories.
+
+**Searching:**
+
+```bash
+qmd query 'question in plain English'   # hybrid BM25 + semantic + rerank
+qmd search 'TICKET-1234'                # keyword only — exact strings, ticket numbers
+```
+
+Tell Claude about it in your `CLAUDE.md` so it reaches for `qmd query` automatically instead of reading whole History files:
+
+```markdown
+## Past session recall
+
+Before reading History files or Clippings, search first: `qmd query 'topic'`
+Collections: specstory (~/.claude/History), clippings (~/.claude/Clippings), and any wiki/notes directories you've added.
+```
+
+## 10. Status line
 
 Claude Code exposes a `statusLine` hook — a command that runs after every turn and whose stdout becomes the status bar below the prompt. The most useful thing to show there: context window percentage, so you can see compaction approaching before it surprises you.
 
