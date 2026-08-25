@@ -21,6 +21,7 @@ Running one Claude Code session per project (instead of one giant session, or re
 | **[sqz](https://github.com/ojuschugh1/sqz) (MCP proxy only)** | Wraps an MCP server (e.g. `github`) and compresses *its* JSON responses — a capability RTK doesn't have at all | ojuschugh1/sqz |
 | **[clawband](https://github.com/jamessoubry/clawband)** | Rust PreToolUse hook — blocks/asks on destructive shell commands before Claude Code runs them | jamessoubry/clawband (mine) |
 | **[compact-plus](https://github.com/u-ichi/compact-plus)** | Laptop-only alternative to LCM's SessionStart injection: PreCompact hook writes a 10-section state file, SessionStart(compact) re-injects it — no database, no daemon | u-ichi/compact-plus |
+| **[starship-claude](https://github.com/martinemde/starship-claude)** | Parses Claude Code's status JSON and exports env vars (context%, model, cost) so Starship can render them in the status line | martinemde/starship-claude |
 | **`/backlog` skill** | Self-pacing agent that works a markdown or GitHub-issues backlog one item at a time, with crash recovery via `ScheduleWakeup` | this repo (`skills/backlog.md`) |
 | **`notify-session.sh`** | Cross-session messaging via `tmux send-keys` — one session can wake/notify another, logged in scrollback | this repo |
 
@@ -104,7 +105,7 @@ bash notify-session.sh myapp "reload your CLAUDE.md"
 
 I compared this against Claude Code's built-in `SendMessage`/`ListAgents` cross-session tools (shipped Aug 2026) and kept tmux instead: `SendMessage` only lands when the target session is already mid-turn, so it can't wake an idle session. `tmux send-keys` actively wakes it, and you get a free audit trail in scrollback — useful when you're coordinating several autonomous sessions and want to know later what one told another.
 
-## 7. Surviving reboots
+## 7. Surviving reboots (server/always-on)
 
 The pieces above run inside a live tmux session — they die on reboot unless something re-creates them. I use a system crontab entry that checks whether the tmux session exists and, if not, recreates it via `claude.sh` before injecting a scheduled prompt (`tmux send-keys`). See `docs/cron-injection-pattern.md` for the pattern (not included as a runnable script here since it's tightly coupled to what you're scheduling).
 
@@ -127,7 +128,7 @@ Everything above assumes an always-on box (a home server, a cloud VM) where a ba
   claude plugin marketplace add u-ichi/compact-plus --scope user
   claude plugin install compact-plus@compact-plus
   ```
-  It calls out to an LLM to generate that state summary on every compaction (default `claude -p`), which is a real per-compaction cost — tune it down if that matters:
+  It calls out to an LLM to generate that state summary on every compaction (default `claude -p`), which is a real per-compaction cost — tune it down if that matters. Add this `env` block at the top level of `~/.claude/settings.json` (alongside `permissions`, `hooks`, etc.):
   ```json
   {
     "env": {
@@ -138,7 +139,104 @@ Everything above assumes an always-on box (a home server, a cloud VM) where a ba
 - **RTK still applies, unchanged.** It's a single binary with no daemon — the laptop/server distinction that matters for LCM doesn't apply to it at all. Same install, same win.
 - **If anything here ends up SQLite-backed** (QMD's own index does), keep its data directory *outside* whatever a cloud sync client (OneDrive, iCloud, Dropbox, Syncthing) watches. Sync tools don't understand SQLite's WAL/shm sidecar files and can upload a torn mid-write snapshot or fight the SQLite process for the file — a real, documented failure mode, not a theoretical one (see: reports of exactly this corrupting Logseq's DB-backed graphs over Syncthing).
 
+### Surviving reboots on macOS
+
+tmux sessions survive sleep/wake, so you only need this for actual reboots or first login of the day. On macOS use a **LaunchAgent** (not cron — launchd is the right tool for login-triggered work):
+
+`~/Library/LaunchAgents/com.user.claude-session.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.claude-session</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/path/to/scripts/ensure-claude-session.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/claude-session-launch.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/claude-session-launch.log</string>
+</dict>
+</plist>
+```
+
+`scripts/ensure-claude-session.sh` (included in this repo) pre-creates the session silently — no interactive attach, no auto-injected prompt. You attach when you open your terminal as normal via `claude.sh`. The reason not to call `claude.sh` directly from the LaunchAgent: it attaches interactively, which hangs a non-TTY process.
+
+Load it once:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.user.claude-session.plist
+```
+
+**Why not auto-inject a prompt on boot** (unlike the server pattern in Section 7): battery drain, no display context, and no user intent. The LaunchAgent just guarantees the session exists; it does no work itself.
+
 Net laptop stack: SpecStory (capture + recall, via QMD) + QMD (search) + compact-plus (compaction continuity) + RTK (shell token cost) + clawband (safety). No daemon that needs to survive a reboot, no server, no secrets beyond what each tool already needs on its own.
+
+## 9. Status line
+
+Claude Code exposes a `statusLine` hook — a command that runs after every turn and whose stdout becomes the status bar below the prompt. The most useful thing to show there: context window percentage, so you can see compaction approaching before it surprises you.
+
+[starship-claude](https://github.com/martinemde/starship-claude) bridges Claude's status JSON to Starship. It parses the JSON piped to it, exports useful values as env vars, then calls Starship to render them:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/martinemde/starship-claude/main/starship-claude \
+  -o ~/.local/bin/starship-claude
+chmod +x ~/.local/bin/starship-claude
+```
+
+Wire it up in `~/.claude/settings.json`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "STARSHIP_CONFIG=~/.claude/starship.toml ~/.local/bin/starship-claude"
+}
+```
+
+The `STARSHIP_CONFIG` override is intentional — Claude's status line runs in a subprocess without your normal shell env, so a dedicated config avoids conflicts with your regular prompt and lets you tune segments specifically for Claude sessions.
+
+Key env vars the script exports:
+
+| Variable             | What it is                                       |
+|----------------------|--------------------------------------------------|
+| `CLAUDE_CONTEXT`     | Context usage, left-padded (e.g. ` 47%`)         |
+| `CLAUDE_PERCENT_RAW` | Raw integer for threshold comparisons            |
+| `CLAUDE_MODEL_NERD`  | Model name with NerdFont icon (e.g. `󰚩 sonnet`)  |
+| `CLAUDE_COST`        | Session cost formatted (e.g. `$0.71`)            |
+| `CLAUDE_RATE_5H`     | 5-hour rate limit % + time to reset              |
+
+Minimal `~/.claude/starship.toml` to show context% and model:
+
+```toml
+add_newline = false
+format = "$time${custom.ctx}$directory$git_branch ${env_var.CLAUDE_MODEL_NERD} "
+
+[time]
+disabled = false
+time_format = "%H:%M:%S"
+format = "[ $time ](bg:214 fg:black)"
+
+[custom.ctx]
+command = "printf '%s' \"${CLAUDE_CONTEXT}\""
+when = "test -n \"${CLAUDE_CONTEXT:-}\""
+use_stdin = false
+format = "[ $output ](fg:black bg:green)"
+shell = ["bash", "--noprofile", "--norc", "-c"]
+
+[env_var.CLAUDE_MODEL_NERD]
+variable = "CLAUDE_MODEL_NERD"
+format = "[$env_value](fg:white)"
+```
+
+Pairs naturally with compact-plus — you watch the context % climb toward 80%, compaction fires, compact-plus re-injects the state summary, and you resume without losing the thread.
 
 ## What's NOT in this repo
 
