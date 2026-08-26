@@ -27,10 +27,12 @@ if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
   exit 1
 fi
 
-# tmux doesn't reliably register Enter when sent in the same send-keys call
-# as the text (known tmux quirk: https://github.com/tmux/tmux/issues/1778).
-# Split into two calls with a short delay.
-tmux send-keys -t "$TMUX_SESSION" -l "$FULL_MSG"
-sleep 0.5
-tmux send-keys -t "$TMUX_SESSION" Enter
+# See docs/cron-injection-pattern.md — tmux send-keys can silently DROP a
+# message (not queue it) if the target pane is mid-turn, not just fail to
+# register Enter. tmux-idle-wait.sh polls for idle before sending instead
+# of trusting a fixed delay.
+# shellcheck source=/dev/null
+. "$(dirname "$0")/tmux-idle-wait.sh"
+
+tmux_send "$TMUX_SESSION" "$FULL_MSG" 120
 echo "Sent to $TMUX_SESSION: $FULL_MSG"
