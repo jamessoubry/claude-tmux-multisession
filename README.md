@@ -22,6 +22,7 @@ Running one Claude Code session per project (instead of one giant session, or re
 | **[clawband](https://github.com/jamessoubry/clawband)** | Rust PreToolUse hook — blocks/asks on destructive shell commands before Claude Code runs them | jamessoubry/clawband (mine) |
 | **[compact-plus](https://github.com/u-ichi/compact-plus)** | Laptop-only alternative to LCM's SessionStart injection: PreCompact hook writes a 10-section state file, SessionStart(compact) re-injects it — no database, no daemon | u-ichi/compact-plus |
 | **[starship-claude](https://github.com/martinemde/starship-claude)** | Parses Claude Code's status JSON and exports env vars (context%, model, cost) so Starship can render them in the status line | martinemde/starship-claude |
+| **`worktree-create.sh` / `worktree-remove.sh`** | WorktreeCreate/WorktreeRemove hooks — per-worktree git setup, CLAUDE.md symlink, permissions sandbox, deterministic dev port | this repo (`scripts/`) |
 | **`/backlog` skill** | Self-pacing agent that works a markdown or GitHub-issues backlog one item at a time, with crash recovery via `ScheduleWakeup` | this repo (`skills/backlog.md`) |
 | **`notify-session.sh`** | Cross-session messaging via `tmux send-keys` — one session can wake/notify another, logged in scrollback | this repo |
 
@@ -43,7 +44,48 @@ The script also starts the LCM daemon and kicks off a SpecStory sync in the back
 
 **Set up:** edit `YOUR_USER` in `scripts/claude.sh`, drop it somewhere on your `$PATH` (or alias it), install [tmux](https://github.com/tmux/tmux) if you don't have it.
 
-## 2. Memory: three layers, different jobs
+## 2. Worktree hooks
+
+Claude Code has native `WorktreeCreate` and `WorktreeRemove` hook events that fire when it creates or deletes a git worktree. Wiring these up gives you per-worktree setup and teardown without any manual steps.
+
+`scripts/worktree-create.sh` and `scripts/worktree-remove.sh` are included in this repo. What they do:
+
+**Create:**
+- Runs `git worktree add` (reusing an existing worktree if the branch is already checked out)
+- Symlinks `CLAUDE.md` from the main repo so the worktree inherits project instructions
+- Writes a `.claude/settings.local.json` granting full read/write inside the worktree only
+- Hashes the branch name to a deterministic dev port (useful if your stack needs one)
+- Commented-out sections for: copying `.env` files, copying data directories, running `npm install` / `pip install`
+
+**Remove:**
+- Runs `git worktree remove --force`
+- Deletes the branch if it follows a `worktree-*` naming convention
+- Commented-out section for: killing the dev port process
+
+**Contract — important:** `WorktreeCreate` must print the worktree path on stdout and nothing else — Claude Code reads stdout to know where the worktree landed. All progress output in the script goes to `/dev/tty` instead. Getting this wrong silently breaks worktree creation.
+
+**Install:**
+
+```bash
+cp scripts/worktree-create.sh ~/.claude/hooks/worktree-create.sh
+cp scripts/worktree-remove.sh ~/.claude/hooks/worktree-remove.sh
+chmod +x ~/.claude/hooks/worktree-create.sh ~/.claude/hooks/worktree-remove.sh
+```
+
+Wire into `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "WorktreeCreate": [{ "hooks": [{ "type": "command", "command": "~/.claude/hooks/worktree-create.sh" }] }],
+    "WorktreeRemove": [{ "hooks": [{ "type": "command", "command": "~/.claude/hooks/worktree-remove.sh" }] }]
+  }
+}
+```
+
+Customise the commented-out sections in each script for your stack — the scripts are designed to be edited, not used as-is.
+
+## 3. Memory: three layers, different jobs
 
 The mistake is treating "AI memory" as one problem. It's three:
 
@@ -53,7 +95,7 @@ The mistake is treating "AI memory" as one problem. It's three:
 
 See `docs/memory-architecture.md` for the full breakdown, including how they're wired into `CLAUDE.md`.
 
-## 3. Token cost: RTK for the shell, sqz for MCP servers
+## 4. Token cost: RTK for the shell, sqz for MCP servers
 
 [RTK](https://github.com/rtk-ai/rtk) sits between your shell and Claude via a PreToolUse-style rewrite: `git status` silently becomes `git status | rtk compress` (or similar), cutting typical dev-command output by 60–90% with no behaviour change from your side. Single Rust binary, no daemon, install once.
 
@@ -75,13 +117,13 @@ Where sqz *does* win, and RTK has zero equivalent: `sqz-mcp proxy` wraps another
 
 Net setup: RTK on the Bash `PreToolUse` hook, sqz only wrapping MCP servers likely to return large result sets (issue lists, PR search, commit history). Neither tool replaces the other — they solve different problems.
 
-## 4. Safety: clawband
+## 5. Safety: clawband
 
 [clawband](https://github.com/jamessoubry/clawband) is a Rust PreToolUse hook I wrote — it inspects every shell command Claude Code is about to run and blocks or asks-for-confirmation on destructive patterns (`rm -rf`, force-pushes, `crontab` overwrites, etc.) before they execute. On this repo's own always-on box, Claude Code runs with `--dangerously-skip-permissions` ("yolo mode") for unattended/cron work, and clawband is what makes that survivable — it's the only safety net once Claude Code's own permission prompts are off.
 
 **With normal permissions on (not yolo)** — the default for interactive work, e.g. a work laptop — clawband still earns its place, just for a different reason: it's a hard, pattern-matched DENY tier that Claude Code's own permission system doesn't have (a generic "allow this tool call?" prompt doesn't tell you it matched `rm -rf` specifically, and can be approved on autopilot), and it collapses the ASK tier to one clear reason instead of a wall of individual per-command prompts. Standalone binary, no daemon — applies identically on a laptop or a server.
 
-## 5. Autonomous backlog work: `/backlog`
+## 6. Autonomous backlog work: `/backlog`
 
 `skills/backlog.md` is a Claude Code skill (drop it in `~/.claude/commands/`) that works through a markdown checklist or a GitHub repo's labelled issues, one item per invocation:
 
@@ -94,7 +136,7 @@ Each tick: pick the next item → implement (coder agent) → test (tester agent
 
 This is the piece that turns "I have a list of things Claude should get around to" into something that actually runs unattended over hours/days.
 
-## 6. Cross-session messaging
+## 7. Cross-session messaging
 
 `scripts/notify-session.sh` sends a message from one Claude Code session into another's tmux pane:
 
@@ -105,11 +147,11 @@ bash notify-session.sh myapp "reload your CLAUDE.md"
 
 I compared this against Claude Code's built-in `SendMessage`/`ListAgents` cross-session tools (shipped Aug 2026) and kept tmux instead: `SendMessage` only lands when the target session is already mid-turn, so it can't wake an idle session. `tmux send-keys` actively wakes it, and you get a free audit trail in scrollback — useful when you're coordinating several autonomous sessions and want to know later what one told another.
 
-## 7. Surviving reboots (server/always-on)
+## 8. Surviving reboots (server/always-on)
 
 The pieces above run inside a live tmux session — they die on reboot unless something re-creates them. I use a system crontab entry that checks whether the tmux session exists and, if not, recreates it via `claude.sh` before injecting a scheduled prompt (`tmux send-keys`). See `docs/cron-injection-pattern.md` for the pattern (not included as a runnable script here since it's tightly coupled to what you're scheduling).
 
-## 8. Laptop setup: no server, no daemon
+## 9. Laptop setup: no server, no daemon
 
 Everything above assumes an always-on box (a home server, a cloud VM) where a background daemon like LCM makes sense — it just runs, forever, and catches up on its own. A laptop that's suspended and restarted constantly through the day is a different shape of problem, and running the same stack on it is the wrong move, not just a smaller version of the right one.
 
@@ -178,7 +220,7 @@ launchctl load ~/Library/LaunchAgents/com.user.claude-session.plist
 
 Net laptop stack: SpecStory (capture + recall, via QMD) + QMD (search) + compact-plus (compaction continuity) + RTK (shell token cost) + clawband (safety). No daemon that needs to survive a reboot, no server, no secrets beyond what each tool already needs on its own.
 
-## 9. SpecStory + qmd wiring
+## 10. SpecStory + qmd wiring
 
 SpecStory converts Claude Code's JSONL session logs into readable markdown. QMD indexes those files so Claude can search across all past sessions in one `qmd query` call rather than reading whole transcripts.
 
@@ -232,7 +274,7 @@ Before reading History files or Clippings, search first: `qmd query 'topic'`
 Collections: specstory (~/.claude/History), clippings (~/.claude/Clippings), and any wiki/notes directories you've added.
 ```
 
-## 10. Status line
+## 11. Status line
 
 Claude Code exposes a `statusLine` hook — a command that runs after every turn and whose stdout becomes the status bar below the prompt. The most useful thing to show there: context window percentage, so you can see compaction approaching before it surprises you.
 
