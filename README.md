@@ -93,7 +93,7 @@ The mistake is treating "AI memory" as one problem. It's three:
 - **ICM** — active, deliberate, high-signal. Claude calls `icm store` when something durable happens: a bug root-caused, an architecture decision made, a user preference discovered. This is the layer with editorial judgement.
 - **QMD** — not memory at all, it's search. Indexes your knowledge base and session history (specstory output) so either of the above — or a plain markdown wiki — becomes queryable.
 
-See `docs/memory-architecture.md` for the full breakdown, including how they're wired into `CLAUDE.md`.
+See `docs/memory-architecture.md` for the full breakdown, including how they're wired into `CLAUDE.md`. See `docs/memory-systems-shootout-2026-08.md` for a write-up of three other memory tools (memsearch, claude-mem, MemPalace) evaluated against this stack, with test results and why each call was made.
 
 ## 4. Token cost: RTK for the shell, sqz for MCP servers
 
