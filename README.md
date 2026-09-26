@@ -64,6 +64,31 @@ Claude Code has native `WorktreeCreate` and `WorktreeRemove` hook events that fi
 
 **Contract — important:** `WorktreeCreate` must print the worktree path on stdout and nothing else — Claude Code reads stdout to know where the worktree landed. All progress output in the script goes to `/dev/tty` instead. Getting this wrong silently breaks worktree creation.
 
+**Gotcha — these hooks are silently skipped inside a git repo.** Claude Code only delegates to `WorktreeCreate`/`WorktreeRemove` when it's *outside* a git repository. Inside one — the normal case — `EnterWorktree` (and the `-w`/`--worktree` CLI flag) ignores this hook entirely and creates the worktree natively at `.claude/worktrees/<name>` instead.
+
+That matters because a worktree there gets permanently flagged by Claude Code as "worktree-isolated": an intentional, undisable sandbox that blocks `git -C`, any `cd`/`pushd` chained with a git command in the same line, and generally any command it can't statically prove stays inside the worktree. This breaks normal git usage for that session's entire lifetime, including every future `--resume` — there's no in-session fix, not even `ExitWorktree` (it's a no-op once the session has been through `/compact`, since isolation enforcement survives compaction but `ExitWorktree`'s own entry-tracking doesn't). It also compounds badly with RTK: RTK's PreToolUse hook rewrites `git status` → `rtk git status` unconditionally, which makes the git operation's shape unverifiable to the sandbox, so it gets refused too ([rtk-ai/rtk#3864](https://github.com/rtk-ai/rtk/issues/3864)) — not an RTK bug, just the first thing to visibly break.
+
+**The actual fix:** don't rely on `-w`/`EnterWorktree` for repos at all. Invoke the hook script directly as a plain shell command instead — since it's not a tool call, it never sets the isolation flag:
+
+```bash
+pushd <repo> && echo '{"name":"<worktree-name>"}' | CLAUDE_PROJECT_DIR=$(pwd) bash ~/.claude/hooks/worktree-create.sh && popd
+```
+
+Tell Claude about this in your `CLAUDE.md` so it does this automatically instead of reaching for `EnterWorktree`:
+
+```markdown
+## Git worktrees
+
+Never use the `EnterWorktree` tool or `-w`/`--worktree` flag in this repo — Claude Code creates
+worktrees natively under `.claude/worktrees/<name>` and permanently sandboxes that session
+(blocks `git -C`, `cd`+git chaining, etc. — no in-session fix, not even `ExitWorktree`).
+
+Instead, invoke the hook script directly as a plain command:
+`pushd <repo> && echo '{"name":"<name>"}' | CLAUDE_PROJECT_DIR=$(pwd) bash ~/.claude/hooks/worktree-create.sh && popd`
+```
+
+An existing worktree already stuck in `.claude/worktrees/` can be migrated out with `git worktree move <old> <repo>__worktrees/<name>` — but only while its session is idle, and expect its cwd to break immediately after (isolated sessions re-`cd` to a stored path string each command rather than inheriting a live shell's cwd, so moving the directory out from under it needs a `pushd <new-path>` as a standalone command, nothing chained, before anything else works again).
+
 **Install:**
 
 ```bash
@@ -92,6 +117,15 @@ The mistake is treating "AI memory" as one problem. It's three:
 - **LCM** — passive, automatic, cheap. Runs in the background, captures everything, decides later what's worth keeping via compact+promote. You never call it directly during normal work.
 - **ICM** — active, deliberate, high-signal. Claude calls `icm store` when something durable happens: a bug root-caused, an architecture decision made, a user preference discovered. This is the layer with editorial judgement.
 - **QMD** — not memory at all, it's search. Indexes your knowledge base and session history (specstory output) so either of the above — or a plain markdown wiki — becomes queryable.
+
+**Gotcha — one oversized source file can OOM every query, not just slow it down.** QMD's doc-lookup query joins the full document body once per *matching chunk*, not deduped per document ([tobi/qmd#987](https://github.com/tobi/qmd/issues/987)). A single very large source file (we hit this at 67MB — an un-rotated specstory session transcript) gets chunked into hundreds of pieces; a broad query that matches dozens of those chunks reloads that file's entire body into memory once per match, multiplying into gigabytes and crashing Node even with a raised `--max-old-space-size`. Symptom: `qmd query` (not `qmd search`, which is keyword-only and unaffected) crashes with "JavaScript heap out of memory" inside better-sqlite3.
+
+**Fix:** find and remove outlier-sized files from the indexed corpus, not just raise the heap limit (we tried 8GB, still crashed — this isn't a scale problem, it's a real duplication bug):
+```bash
+find ~/.claude/History -name "*.md" -exec du -h {} \; | sort -rh | head -10   # find the outliers
+mv <oversized-file> somewhere-qmd-doesn't-scan/                              # move, don't delete
+qmd update && qmd cleanup                                                     # re-index + reclaim orphaned vectors
+```
 
 See `docs/memory-architecture.md` for the full breakdown, including how they're wired into `CLAUDE.md`. See `docs/memory-systems-shootout-2026-08.md` for a write-up of three other memory tools (memsearch, claude-mem, MemPalace) evaluated against this stack, with test results and why each call was made.
 
